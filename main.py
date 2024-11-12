@@ -7,6 +7,7 @@ root = ctk.CTk()
 root.geometry("350x600")
 
 # Some comment
+# MOre comment
 w = root.winfo_width()
 h = root.winfo_height()
 
