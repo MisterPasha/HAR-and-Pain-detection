@@ -6,7 +6,7 @@ ctk.set_default_color_theme("green")
 root = ctk.CTk()
 root.geometry("350x600")
 
-# some comment
+# Some comment
 w = root.winfo_width()
 h = root.winfo_height()
 
