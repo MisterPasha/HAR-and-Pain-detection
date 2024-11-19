@@ -6,7 +6,7 @@ import threading
 class BLE:
     def __init__(self, status_var):
         self.connected_devices = []           # List to store connected RFduino devices
-        self.RFDUINO_NAME_PREFIX = "RFduino"  # Prefix for RFduino names
+        self.RFDUINO_NAME_PREFIX = "Head"  # Prefix for RFduino names
         self.is_running = False               # Flag for running function
         self.status_var = status_var          # Connection Status String
 
@@ -24,9 +24,10 @@ class BLE:
 
     async def main(self):
         # Discover BLE devices
-        devices = await BleakScanner.discover(timeout=5)  # Searches devices for 5 seconds
+        devices = await BleakScanner.discover(timeout=10)  # Searches devices for 5 seconds
         # Filter out devices that match the RFduino name prefix
         rfduino_devices = [d for d in devices if d.name and d.name.startswith(self.RFDUINO_NAME_PREFIX)]
+        #rfduino_devices = devices
 
         if not rfduino_devices:
             self.status_var.set("No RFduinos detected")
