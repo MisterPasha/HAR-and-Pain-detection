@@ -17,7 +17,7 @@ class BLE:
                 self.connected_devices.append(client)  # Store the connected client
                 self.status_var.set(f"Connected to {device.name} ({device.address})")
                 print(f"Connected to {device.name} ({device.address})")
-                # Perform any specific RFduino operations here
+                # Perform any specific operations here
         except Exception as e:
             self.status_var.set(f"Failed to connect to {device.name}: {e}")
             print(f"Failed to connect to {device.name}: {e}")
