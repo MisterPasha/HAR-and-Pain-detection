@@ -1,7 +1,7 @@
 import asyncio
 from bleak import BleakScanner, BleakClient
 import threading
-
+import matplotlib.pyplot as plt
 
 class BLE:
     def __init__(self, status_var):
@@ -12,17 +12,22 @@ class BLE:
             "Head": "12340015-cbed-76db-9423-74ce6ab55dee",
             "RArm": "12340015-cbed-76db-9423-74ce6ab52dee"
         }
+        self.RFDUINO_UUID_TO_NAME = {
+            "12340015-cbed-76db-9423-74ce6ab55dee": "Head",
+            "12340015-cbed-76db-9423-74ce6ab52dee": "RArm"
+        }
         self.RFDUINO_ADDRESS_TO_UUID = {}     # Get uuid by BleakClient address
         self.is_running = False               # Flag for running function
         self.is_streaming = False
         self.status_var = status_var          # Connection Status String
+        self.device_data = {}
 
     async def data_handler(self, sender, data):
         """Callback to handle incoming data from RFduino."""
         decoded_data = data.decode('utf-8')
         parts = decoded_data.split()
         self.status_var.set(f"x: {parts[1]}   y: {parts[2]}")
-        # print(data, type(data))
+        self.device_data.setdefault(sender.uuid, []).append(parts)
 
     async def connect_to_rfduino(self, device):
         """Function to connect to a single RFduino device and set up notifications."""
@@ -95,6 +100,7 @@ class BLE:
         except Exception as e:
             print(f"Error during streaming: {e}")
         finally:
+            print("IM IN THE FINALLY!!!!!!!!!!")
             # Stop notifications and disconnect when streaming stops
             for client in self.connected_devices:
                 try:
@@ -123,3 +129,42 @@ class BLE:
             threading.Thread(target=self._run_streaming_loop, daemon=True).start()
         else:
             self.status_var.set("Connect to devices first")
+
+    def stop_streaming(self):
+        self.is_streaming = False
+        self.plot_data()
+
+    def plot_data(self):
+        # Create a figure
+        plt.figure(figsize=(12, 8))
+
+        data = self.device_data
+
+        # Iterate through the dictionary and plot data for each UUID
+        for uuid, values in data.items():
+            name = self.RFDUINO_UUID_TO_NAME[uuid]
+            # Extract timestamp, x angle, and y angle
+            timestamps = [int(item[0]) for item in values]
+            min_time = min(timestamps)
+            timestamps_in_seconds = [int((t - min_time) / 1000) for t in timestamps]  # Convert to seconds relative to min_time
+            x_angles = [int(item[1]) for item in values]
+            y_angles = [int(item[2]) for item in values]
+
+            # Plot x angles
+            plt.plot(timestamps_in_seconds, x_angles, label=f"{name} - X Angle", linestyle='-')
+            # Plot y angles
+            plt.plot(timestamps_in_seconds, y_angles, label=f"{name} - Y Angle", linestyle='-')
+
+        # Add legend
+        plt.legend()
+
+        # Add titles and labels
+        plt.title("Y Angle Over Time")
+        plt.xlabel("Seconds")
+        plt.ylabel("Angles (degrees)")
+
+        # Show grid for better readability
+        plt.grid(True)
+
+        # Show the plot
+        plt.show()

@@ -16,13 +16,18 @@ class MainFrame(ctk.CTkFrame):
         w = self.master.winfo_width()
         h = self.master.winfo_height()
 
-        button_connect = ctk.CTkButton(self, text="Connect to Sensors", width=int(w / 2.8), height=int(h / 15),
-                                       command=self.ble.run)
-        button_connect.pack(pady=(10, 50), padx=20, side="bottom")
+        button_stop_streaming = ctk.CTkButton(self, text="Stop Streaming", width=int(w / 2.8), height=int(h / 15),
+                                              command=self.ble.stop_streaming)
+        button_stop_streaming.pack(pady=(10, 50), padx=20, side="bottom")
 
         button_start_streaming = ctk.CTkButton(self, text="Start Streaming", width=int(w / 2.8), height=int(h / 15),
                                                command=self.ble.start_streaming)
-        button_start_streaming.pack(pady=(50, 0), padx=20, side="bottom")
+        button_start_streaming.pack(pady=(10, 0), padx=20, side="bottom")
+
+        button_connect = ctk.CTkButton(self, text="Connect to Sensors", width=int(w / 2.8), height=int(h / 15),
+                                       command=self.ble.run)
+        button_connect.pack(pady=(0, 0), padx=20, side="bottom")
+
 
     def make_labels(self):
         status_label = ctk.CTkLabel(self, textvariable=self.connection_status)
