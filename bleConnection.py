@@ -2,6 +2,8 @@ import asyncio
 from bleak import BleakScanner, BleakClient
 import threading
 import matplotlib.pyplot as plt
+import time
+
 
 class BLE:
     def __init__(self, status_var):
@@ -21,12 +23,14 @@ class BLE:
         self.is_streaming = False
         self.status_var = status_var          # Connection Status String
         self.device_data = {}
+        self.start_time = None
+        self.end_time = None
 
     async def data_handler(self, sender, data):
         """Callback to handle incoming data from RFduino."""
         decoded_data = data.decode('utf-8')
         parts = decoded_data.split()
-        self.status_var.set(f"x: {parts[1]}   y: {parts[2]}")
+        self.status_var.set(f"x: {parts[1]}   y: {parts[2]}   z: {parts[3]}")
         self.device_data.setdefault(sender.uuid, []).append(parts)
 
     async def connect_to_rfduino(self, device):
@@ -100,27 +104,26 @@ class BLE:
         except Exception as e:
             print(f"Error during streaming: {e}")
         finally:
-            print("IM IN THE FINALLY!!!!!!!!!!")
             # Stop notifications and disconnect when streaming stops
             for client in self.connected_devices:
                 try:
                     uuid = self.RFDUINO_ADDRESS_TO_UUID[client.address]
                     await client.stop_notify(uuid)
-                    await client.disconnect()
-                    print(f"Disconnected from {client.address}")
+                    print("stopped notifying")
                 except Exception as e:
                     print(f"Error during cleanup for {client.address}: {e}")
+        self.device_data = {}
 
     def _run_streaming_loop(self):
         """Run the asyncio event loop for the stream method."""
-        loop = asyncio.new_event_loop()  # Create a new event loop
-        asyncio.set_event_loop(loop)  # Set it as the current event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(self.stream())  # Run the streaming coroutine
+            loop.run_until_complete(self.stream())
         except Exception as e:
             print(f"Error in streaming loop: {e}")
         finally:
-            loop.close()  # Properly close the event loop
+            loop.close()
 
     def start_streaming(self):
         self.is_streaming = True
@@ -132,34 +135,72 @@ class BLE:
 
     def stop_streaming(self):
         self.is_streaming = False
-        self.plot_data()
+        self.plot_data2()
 
     def plot_data(self):
         # Create a figure
         plt.figure(figsize=(12, 8))
 
-        data = self.device_data
-
         # Iterate through the dictionary and plot data for each UUID
-        for uuid, values in data.items():
+        for uuid, values in self.device_data.items():
             name = self.RFDUINO_UUID_TO_NAME[uuid]
             # Extract timestamp, x angle, and y angle
             timestamps = [int(item[0]) for item in values]
             min_time = min(timestamps)
-            timestamps_in_seconds = [int((t - min_time) / 1000) for t in timestamps]  # Convert to seconds relative to min_time
+            timestamps_in_seconds = [(t - min_time) / 1000 for t in timestamps]  # Convert to seconds
             x_angles = [int(item[1]) for item in values]
             y_angles = [int(item[2]) for item in values]
+            z_angles = [int(item[3]) for item in values]
 
             # Plot x angles
             plt.plot(timestamps_in_seconds, x_angles, label=f"{name} - X Angle", linestyle='-')
             # Plot y angles
             plt.plot(timestamps_in_seconds, y_angles, label=f"{name} - Y Angle", linestyle='-')
+            # Plot z angles
+            plt.plot(timestamps_in_seconds, z_angles, label=f"{name} - Z Angle", linestyle='-')
 
         # Add legend
         plt.legend()
 
         # Add titles and labels
-        plt.title("Y Angle Over Time")
+        plt.title("Comparison of two devices")
+        plt.xlabel("Seconds")
+        plt.ylabel("Angles (degrees)")
+
+        # Show grid for better readability
+        plt.grid(True)
+
+        # Show the plot
+        plt.show()
+
+    def plot_data2(self):
+        # Create a figure
+        plt.figure(figsize=(12, 8))
+
+
+
+        # Iterate through the dictionary and plot data for each UUID
+        for uuid, values in self.device_data.items():
+            name = self.RFDUINO_UUID_TO_NAME[uuid]
+            # Extract timestamp, x angle, and y angle
+            timestamps = [int(item[0]) for item in values]
+            print(f"{name} start: {timestamps[0]}    finish: {timestamps[1]}")
+            x_angles = [int(item[1]) for item in values]
+            y_angles = [int(item[2]) for item in values]
+            z_angles = [int(item[3]) for item in values]
+
+            # Plot x angles
+            plt.plot(timestamps, x_angles, label=f"{name} - X Angle", linestyle='-')
+            # Plot y angles
+            plt.plot(timestamps, y_angles, label=f"{name} - Y Angle", linestyle='-')
+            # Plot z angles
+            plt.plot(timestamps, z_angles, label=f"{name} - Z Angle", linestyle='-')
+
+        # Add legend
+        plt.legend()
+
+        # Add titles and labels
+        plt.title("Comparison of two devices")
         plt.xlabel("Seconds")
         plt.ylabel("Angles (degrees)")
 
