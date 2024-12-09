@@ -69,6 +69,7 @@ class BLE:
         # Connect to each RFduino simultaneously
         tasks = [self.connect_to_rfduino(device) for device in rfduino_devices]
         await asyncio.gather(*tasks)  # Connect to all devices concurrently
+
         # Print final connected devices
         connected_devices = "\nConnected RFduino devices:"
         for name in self.connected_devices_names:
@@ -95,23 +96,20 @@ class BLE:
     async def stream(self):
         """Keep the streaming active for all connected devices."""
         try:
-            for client in self.connected_devices:
-                uuid = self.RFDUINO_ADDRESS_TO_UUID[client.address]
-                await client.start_notify(uuid, self.data_handler)
+            # Start streaming each RFduino simultaneously
+            tasks = [client.start_notify(self.RFDUINO_ADDRESS_TO_UUID[client.address], self.data_handler) for
+                     client in self.connected_devices]
+            await asyncio.gather(*tasks)
             # Ensure the streaming loop remains active
             while self.is_streaming:
                 await asyncio.sleep(1)
         except Exception as e:
             print(f"Error during streaming: {e}")
         finally:
-            # Stop notifications and disconnect when streaming stops
-            for client in self.connected_devices:
-                try:
-                    uuid = self.RFDUINO_ADDRESS_TO_UUID[client.address]
-                    await client.stop_notify(uuid)
-                    print("stopped notifying")
-                except Exception as e:
-                    print(f"Error during cleanup for {client.address}: {e}")
+            # Stop streaming each RFduino simultaneously
+            tasks = [client.stop_notify(self.RFDUINO_ADDRESS_TO_UUID[client.address]) for client in
+                     self.connected_devices]
+            await asyncio.gather(*tasks)
         self.device_data = {}
 
     def _run_streaming_loop(self):
@@ -177,14 +175,17 @@ class BLE:
         # Create a figure
         plt.figure(figsize=(12, 8))
 
-
+        start = []
+        end = []
 
         # Iterate through the dictionary and plot data for each UUID
         for uuid, values in self.device_data.items():
             name = self.RFDUINO_UUID_TO_NAME[uuid]
             # Extract timestamp, x angle, and y angle
             timestamps = [int(item[0]) for item in values]
-            print(f"{name} start: {timestamps[0]}    finish: {timestamps[1]}")
+            start.append(timestamps[0])
+            end.append(timestamps[-1])
+            print(f"{name} start: {timestamps[0]}    finish: {timestamps[-1]}")
             x_angles = [int(item[1]) for item in values]
             y_angles = [int(item[2]) for item in values]
             z_angles = [int(item[3]) for item in values]
@@ -192,9 +193,12 @@ class BLE:
             # Plot x angles
             plt.plot(timestamps, x_angles, label=f"{name} - X Angle", linestyle='-')
             # Plot y angles
-            plt.plot(timestamps, y_angles, label=f"{name} - Y Angle", linestyle='-')
+            #plt.plot(timestamps, y_angles, label=f"{name} - Y Angle", linestyle='-')
             # Plot z angles
-            plt.plot(timestamps, z_angles, label=f"{name} - Z Angle", linestyle='-')
+            #plt.plot(timestamps, z_angles, label=f"{name} - Z Angle", linestyle='-')
+
+        print(f"interval between starts: {start[0] - start[1]}")
+        print(f"interval between ends: {end[0] - end[1]}")
 
         # Add legend
         plt.legend()
