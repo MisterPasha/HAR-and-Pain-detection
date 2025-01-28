@@ -1,7 +1,10 @@
 import asyncio
+import struct
+import numpy as np
 from bleak import BleakScanner, BleakClient
 import threading
 import matplotlib.pyplot as plt
+from collections import Counter
 import time
 
 
@@ -9,28 +12,54 @@ class BLE:
     def __init__(self, status_var):
         self.connected_devices = []           # List to store connected RFduino devices
         self.connected_devices_names = []     # Record names of connected devices
-        self.RFDUINO_NAMES = ["Head", "RArm"]               # List of all RFduino names
+        self.RFDUINO_NAMES = ["Head", "RArm", "RShank", "RThigh", "Back", "LShank"]  # List of all RFduino names
         self.RFDUINO_NAME_TO_UUID = {         # Get uuid by device name
             "Head": "12340015-cbed-76db-9423-74ce6ab55dee",
-            "RArm": "12340015-cbed-76db-9423-74ce6ab52dee"
+            "RArm": "12340015-cbed-76db-9423-74ce6ab52dee",
+            "RShank": "12340015-cbed-76db-9423-74ce6ab59dee",
+            "LShank": "12340015-cbed-76db-9423-74ce6ab57dee",
+            "Back": "12340015-cbed-76db-9423-74ce6ab56dee",
+            "RThigh": "12340015-cbed-76db-9423-74ce6ab51dee"
         }
         self.RFDUINO_UUID_TO_NAME = {
             "12340015-cbed-76db-9423-74ce6ab55dee": "Head",
-            "12340015-cbed-76db-9423-74ce6ab52dee": "RArm"
+            "12340015-cbed-76db-9423-74ce6ab52dee": "RArm",
+            "12340015-cbed-76db-9423-74ce6ab59dee": "RShank",
+            "12340015-cbed-76db-9423-74ce6ab57dee": "LShank",
+            "12340015-cbed-76db-9423-74ce6ab56dee": "Back",
+            "12340015-cbed-76db-9423-74ce6ab51dee": "RThigh"
         }
         self.RFDUINO_ADDRESS_TO_UUID = {}     # Get uuid by BleakClient address
         self.is_running = False               # Flag for running function
         self.is_streaming = False
         self.status_var = status_var          # Connection Status String
         self.device_data = {}
+        self.time_data = [0]
+        self.time_intervals = []
         self.start_time = None
         self.end_time = None
+        self.connect_time = None
 
     async def data_handler(self, sender, data):
         """Callback to handle incoming data from RFduino."""
+        #print(f"Data packet Size: {len(data)}")
+        # Unpack the received 20-byte data
+        try:
+            ax, ay, az, gx, gy, gz, timestamp = struct.unpack("<hhhhhhI", data)
+            #print(f"Accelerometer: ax={ax}, ay={ay}, az={az}")
+            #print(f"Timestamp: {timestamp} ms")
+            #print(f"Gyroscope: gx={gx}, gy={gy}, gz={gz}")
+            #self.time_intervals.append(timestamp - self.time_data[-1])
+            #self.time_data.append(timestamp)
+            self.device_data.setdefault(sender.uuid, []).append(timestamp)
+        except struct.error as e:
+            print(f"Error unpacking data: {e}")
+
+    def data_handler_for_euler_angles(self, sender, data):
         decoded_data = data.decode('utf-8')
+        print(decoded_data)
         parts = decoded_data.split()
-        self.status_var.set(f"x: {parts[1]}   y: {parts[2]}   z: {parts[3]}")
+        self.status_var.set(f"x: {parts[1]}   y: {parts[2]}")
         self.device_data.setdefault(sender.uuid, []).append(parts)
 
     async def connect_to_rfduino(self, device):
@@ -58,6 +87,8 @@ class BLE:
     async def main(self):
         # Discover BLE devices
         devices = await BleakScanner.discover(timeout=5)  # Searches devices for 5 seconds
+        #[print(d.name) for d in devices if d.name]
+        print(len(devices))
         rfduino_devices = [d for d in devices if d.name in self.RFDUINO_NAMES]
 
         if not rfduino_devices:
@@ -68,6 +99,7 @@ class BLE:
 
         # Connect to each RFduino simultaneously
         tasks = [self.connect_to_rfduino(device) for device in rfduino_devices]
+        self.connect_time = time.time() * 1000  # Convert seconds to milliseconds
         await asyncio.gather(*tasks)  # Connect to all devices concurrently
 
         # Print final connected devices
@@ -133,7 +165,44 @@ class BLE:
 
     def stop_streaming(self):
         self.is_streaming = False
-        self.plot_data2()
+        self.plot_data4()
+
+    def align_sensor_data_by_timestamp(self, sensor_data, truth_timestamps):
+        # Extract timestamps and data values
+        timestamps = np.array([ts for ts, _ in sensor_data])
+        values = np.array([val for _, val in sensor_data])
+
+        # Create an aligned array to hold the final values
+        aligned_values = []
+
+        # For each ground truth timestamp, find the closest sensor timestamp
+        for t in truth_timestamps:
+            # Find the index of the closest timestamp in sensor data
+            closest_index = np.argmin(np.abs(timestamps - t))
+            closest_time = timestamps[closest_index]
+
+            # Check if the closest timestamp is within a reasonable range
+            if abs(closest_time - t) <= 5:  # Allowable deviation (e.g., within 5 ms)
+                aligned_values.append(values[closest_index])
+                # Remove this timestamp and value to avoid duplicates in the future
+                timestamps = np.delete(timestamps, closest_index)
+                values = np.delete(values, closest_index)
+            else:
+                # If no close timestamp found, interpolate the value
+                if closest_index == 0:
+                    # If the closest index is the first element, use it directly
+                    aligned_values.append(values[closest_index])
+                elif closest_index == len(timestamps) - 1:
+                    # If the closest index is the last element, use it directly
+                    aligned_values.append(values[closest_index])
+                else:
+                    # Interpolate between the two nearest points
+                    t1, t2 = timestamps[closest_index - 1], timestamps[closest_index]
+                    v1, v2 = values[closest_index - 1], values[closest_index]
+                    interpolated_value = np.interp(t, [t1, t2], [v1, v2])
+                    aligned_values.append(interpolated_value)
+
+        return aligned_values
 
     def plot_data(self):
         # Create a figure
@@ -183,28 +252,25 @@ class BLE:
             name = self.RFDUINO_UUID_TO_NAME[uuid]
             # Extract timestamp, x angle, and y angle
             timestamps = [int(item[0]) for item in values]
-            start.append(timestamps[0])
-            end.append(timestamps[-1])
-            print(f"{name} start: {timestamps[0]}    finish: {timestamps[-1]}")
+            min_time = min(timestamps)
+            timestamps_in_seconds = [(t - min_time) / 1000 for t in timestamps]  # Convert to seconds
             x_angles = [int(item[1]) for item in values]
             y_angles = [int(item[2]) for item in values]
-            z_angles = [int(item[3]) for item in values]
+            #z_angles = [int(item[3]) for item in values]
 
             # Plot x angles
-            plt.plot(timestamps, x_angles, label=f"{name} - X Angle", linestyle='-')
+            #plt.plot(timestamps_in_seconds, x_angles, label=f"Trunk - X Angle", linestyle='-')
             # Plot y angles
-            #plt.plot(timestamps, y_angles, label=f"{name} - Y Angle", linestyle='-')
+            plt.plot(timestamps_in_seconds, y_angles, label=f"Trunk - Y Angle", linestyle='-')
             # Plot z angles
             #plt.plot(timestamps, z_angles, label=f"{name} - Z Angle", linestyle='-')
 
-        print(f"interval between starts: {start[0] - start[1]}")
-        print(f"interval between ends: {end[0] - end[1]}")
 
         # Add legend
         plt.legend()
 
         # Add titles and labels
-        plt.title("Comparison of two devices")
+        plt.title("Y Angle Over Time")
         plt.xlabel("Seconds")
         plt.ylabel("Angles (degrees)")
 
@@ -213,3 +279,42 @@ class BLE:
 
         # Show the plot
         plt.show()
+
+    def plot_data3(self):
+        plt.figure(figsize=(12, 8))
+        intervals = self.time_intervals
+        del intervals[0]
+        indexes = [i for i in range(len(intervals))]
+        plt.plot(indexes, intervals, linestyle='-')
+        counter = Counter(intervals)
+        most_common = counter.most_common(1)[0]
+        print()
+        print(f"Minimum Interval: {min(intervals)}")
+        print(f"Maximum Interval: {max(intervals)}")
+        print(f"Mean Interval: {sum(intervals) / len(intervals)}")
+        print(f"Most often Interval: {most_common[0]}")
+        # Add legend
+        plt.legend()
+        # Add titles and labels
+        plt.title("Intervals")
+        plt.xlabel("Sequence")
+        plt.ylabel("Interval")
+
+        # Show grid for better readability
+        plt.grid(True)
+
+        # Show the plot
+        plt.show()
+
+    def plot_data4(self):
+        for k, v in self.device_data.items():
+            intervals = []
+            print("")
+            print(f"Device: {self.RFDUINO_UUID_TO_NAME[k]}")
+            print(f"True Connection time: {self.connect_time}")
+            print(f"Starting time: {v[0]}")
+            print(f"Ending time: {v[-1]}")
+            for i in range(0, len(v)-1):
+                intervals.append(v[i+1] - v[i])
+            print(f"Max/Min interval: {max(intervals)}/{min(intervals)}")
+            print("")
