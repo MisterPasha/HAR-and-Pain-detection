@@ -34,24 +34,27 @@ class BLE:
         self.is_streaming = False
         self.status_var = status_var          # Connection Status String
         self.device_data = {}
-        self.time_data = [0]
-        self.time_intervals = []
-        self.start_time = None
-        self.end_time = None
         self.connect_time = None
+        self.checkpoint = None
+        self.stop_time = None
+        self.time_synced = False
+        self.syncing_intervals = {}
+        self.receive_times = {}
 
     async def data_handler(self, sender, data):
         """Callback to handle incoming data from RFduino."""
-        #print(f"Data packet Size: {len(data)}")
-        # Unpack the received 20-byte data
+        # print(f"Data packet Size: {len(data)}")
+        # Unpack received data 20 bytes
         try:
             ax, ay, az, gx, gy, gz, timestamp = struct.unpack("<hhhhhhI", data)
-            #print(f"Accelerometer: ax={ax}, ay={ay}, az={az}")
-            #print(f"Timestamp: {timestamp} ms")
-            #print(f"Gyroscope: gx={gx}, gy={gy}, gz={gz}")
-            #self.time_intervals.append(timestamp - self.time_data[-1])
-            #self.time_data.append(timestamp)
-            self.device_data.setdefault(sender.uuid, []).append(timestamp)
+            t_received = time.time()*1000 - self.connect_time
+            self.receive_times.setdefault(sender.uuid, []).append(t_received)
+            if not self.time_synced:
+                if len(self.device_data.keys()) > 5:
+                    self.time_synced = True
+                self.syncing_intervals.setdefault(sender.uuid, int(timestamp - self.checkpoint))
+
+            self.device_data.setdefault(sender.uuid, []).append(timestamp - self.syncing_intervals[sender.uuid])
         except struct.error as e:
             print(f"Error unpacking data: {e}")
 
@@ -99,8 +102,8 @@ class BLE:
 
         # Connect to each RFduino simultaneously
         tasks = [self.connect_to_rfduino(device) for device in rfduino_devices]
-        self.connect_time = time.time() * 1000  # Convert seconds to milliseconds
         await asyncio.gather(*tasks)  # Connect to all devices concurrently
+        self.connect_time = time.time() * 1000  # Convert seconds to milliseconds
 
         # Print final connected devices
         connected_devices = "\nConnected RFduino devices:"
@@ -128,10 +131,14 @@ class BLE:
     async def stream(self):
         """Keep the streaming active for all connected devices."""
         try:
+            t_now = time.time() * 1000
+            self.checkpoint = int(t_now - self.connect_time)
+
             # Start streaming each RFduino simultaneously
             tasks = [client.start_notify(self.RFDUINO_ADDRESS_TO_UUID[client.address], self.data_handler) for
                      client in self.connected_devices]
             await asyncio.gather(*tasks)
+
             # Ensure the streaming loop remains active
             while self.is_streaming:
                 await asyncio.sleep(1)
@@ -142,6 +149,7 @@ class BLE:
             tasks = [client.stop_notify(self.RFDUINO_ADDRESS_TO_UUID[client.address]) for client in
                      self.connected_devices]
             await asyncio.gather(*tasks)
+            self.stop_time = int(time.time() * 1000) - self.connect_time
         self.device_data = {}
 
     def _run_streaming_loop(self):
@@ -157,6 +165,7 @@ class BLE:
 
     def start_streaming(self):
         self.is_streaming = True
+        print("Streaming Started . . .")
         if self.connected_devices:
             # Start the streaming loop in a new thread
             threading.Thread(target=self._run_streaming_loop, daemon=True).start()
@@ -165,6 +174,7 @@ class BLE:
 
     def stop_streaming(self):
         self.is_streaming = False
+        self.stop_time = int(time.time() * 1000 - self.connect_time)
         self.plot_data4()
 
     def align_sensor_data_by_timestamp(self, sensor_data, truth_timestamps):
@@ -307,14 +317,38 @@ class BLE:
         plt.show()
 
     def plot_data4(self):
+        differences = {}
+        min_len = min([len(v) for _, v in self.receive_times.items()])
+        x_axis = self.device_data["12340015-cbed-76db-9423-74ce6ab52dee"]
         for k, v in self.device_data.items():
             intervals = []
             print("")
             print(f"Device: {self.RFDUINO_UUID_TO_NAME[k]}")
-            print(f"True Connection time: {self.connect_time}")
-            print(f"Starting time: {v[0]}")
-            print(f"Ending time: {v[-1]}")
+            print(f"Starting time Sensor/Host: {v[0]} / {int(self.checkpoint)}")
+            print(f"Ending time Sensor/Host: {v[-1]} / {self.stop_time}")
+            print(f"Number of frames: {len(v)}")
             for i in range(0, len(v)-1):
                 intervals.append(v[i+1] - v[i])
             print(f"Max/Min interval: {max(intervals)}/{min(intervals)}")
+            differences.setdefault(self.RFDUINO_UUID_TO_NAME[k], [a - b for a, b in zip(self.receive_times[k], v)])
+            print(f"Max/Min Diffs: {max(differences[self.RFDUINO_UUID_TO_NAME[k]])} / {min(differences[self.RFDUINO_UUID_TO_NAME[k]])}")
             print("")
+
+        all_diffs = list(differences.values())
+        mean_values = [sum(t) / len(t) for t in zip(*all_diffs)]
+
+        plt.plot(x_axis[:min_len], mean_values, label=f"All sensors mean", linestyle='-')
+
+        # Add legend
+        plt.legend()
+
+        # Add titles and labels
+        plt.title("Send-Receive delays")
+        plt.xlabel("ms")
+        plt.ylabel("Mean Delay")
+
+        # Show grid for better readability
+        plt.grid(True)
+
+        # Show the plot
+        plt.show()
