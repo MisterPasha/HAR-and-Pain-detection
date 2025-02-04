@@ -6,20 +6,22 @@ import threading
 import matplotlib.pyplot as plt
 from collections import Counter
 import time
+import csv
 
 
 class BLE:
     def __init__(self, status_var):
         self.connected_devices = []           # List to store connected RFduino devices
         self.connected_devices_names = []     # Record names of connected devices
-        self.RFDUINO_NAMES = ["Head", "RArm", "RShank", "RThigh", "Back", "LShank"]  # List of all RFduino names
+        self.RFDUINO_NAMES = ["Head", "RArm", "RShank", "RThigh", "Back", "LShank", "LArm"]  # List of all RFduino names
         self.RFDUINO_NAME_TO_UUID = {         # Get uuid by device name
             "Head": "12340015-cbed-76db-9423-74ce6ab55dee",
             "RArm": "12340015-cbed-76db-9423-74ce6ab52dee",
             "RShank": "12340015-cbed-76db-9423-74ce6ab59dee",
             "LShank": "12340015-cbed-76db-9423-74ce6ab57dee",
             "Back": "12340015-cbed-76db-9423-74ce6ab56dee",
-            "RThigh": "12340015-cbed-76db-9423-74ce6ab51dee"
+            "RThigh": "12340015-cbed-76db-9423-74ce6ab51dee",
+            "LArm": "12340015-cbed-76db-9423-74ce6ab53dee"
         }
         self.RFDUINO_UUID_TO_NAME = {
             "12340015-cbed-76db-9423-74ce6ab55dee": "Head",
@@ -27,7 +29,8 @@ class BLE:
             "12340015-cbed-76db-9423-74ce6ab59dee": "RShank",
             "12340015-cbed-76db-9423-74ce6ab57dee": "LShank",
             "12340015-cbed-76db-9423-74ce6ab56dee": "Back",
-            "12340015-cbed-76db-9423-74ce6ab51dee": "RThigh"
+            "12340015-cbed-76db-9423-74ce6ab51dee": "RThigh",
+            "12340015-cbed-76db-9423-74ce6ab53dee": "LArm"
         }
         self.RFDUINO_ADDRESS_TO_UUID = {}     # Get uuid by BleakClient address
         self.is_running = False               # Flag for running function
@@ -40,8 +43,9 @@ class BLE:
         self.time_synced = False
         self.syncing_intervals = {}
         self.receive_times = {}
+        self.sensor_intervals = {}  # Intervals between AccelGyro and Mag extraction intervals
 
-    async def data_handler(self, sender, data):
+    async def data_handler_for_timestamping(self, sender, data):
         """Callback to handle incoming data from RFduino."""
         # print(f"Data packet Size: {len(data)}")
         # Unpack received data 20 bytes
@@ -54,7 +58,21 @@ class BLE:
                     self.time_synced = True
                 self.syncing_intervals.setdefault(sender.uuid, int(timestamp - self.checkpoint))
 
-            self.device_data.setdefault(sender.uuid, []).append(timestamp - self.syncing_intervals[sender.uuid])
+            self.device_data.setdefault(self.RFDUINO_UUID_TO_NAME[sender.uuid], []).append(timestamp - self.syncing_intervals[sender.uuid])
+        except struct.error as e:
+            print(f"Error unpacking data: {e}")
+
+    def data_handler_for_sensor_interval_data(self, sender, data):
+        try:
+            accel_gyro_interval, mag_interval = struct.unpack("<II", data)
+            self.sensor_intervals.setdefault(self.RFDUINO_UUID_TO_NAME[sender.uuid], []).append([accel_gyro_interval, mag_interval])
+        except struct.error as e:
+            print(f"Error unpacking data: {e}")
+
+    def data_handler_for_sensor_interval_data_grouped(self, sender, data):
+        try:
+            group_interval = struct.unpack("<I", data)
+            self.sensor_intervals.setdefault(self.RFDUINO_UUID_TO_NAME[sender.uuid], []).append(group_interval)
         except struct.error as e:
             print(f"Error unpacking data: {e}")
 
@@ -135,7 +153,7 @@ class BLE:
             self.checkpoint = int(t_now - self.connect_time)
 
             # Start streaming each RFduino simultaneously
-            tasks = [client.start_notify(self.RFDUINO_ADDRESS_TO_UUID[client.address], self.data_handler) for
+            tasks = [client.start_notify(self.RFDUINO_ADDRESS_TO_UUID[client.address], self.data_handler_for_timestamping) for
                      client in self.connected_devices]
             await asyncio.gather(*tasks)
 
@@ -175,7 +193,7 @@ class BLE:
     def stop_streaming(self):
         self.is_streaming = False
         self.stop_time = int(time.time() * 1000 - self.connect_time)
-        self.plot_data4()
+        self.save_sensor_timestamps_as_csv()
 
     def align_sensor_data_by_timestamp(self, sensor_data, truth_timestamps):
         # Extract timestamps and data values
@@ -352,3 +370,70 @@ class BLE:
 
         # Show the plot
         plt.show()
+
+    def save_sensor_timestamps_as_csv(self, filename="sensor_timestamps.csv"):
+
+        sensor_names = list(self.device_data.keys())
+        header = []
+        for sensor in sensor_names:
+            header.append(f"{sensor}")
+
+        rows = zip(*[self.device_data[sensor] for sensor in sensor_names])
+
+        # Save to CSV
+        with open(filename, "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(header)  # Write header
+            writer.writerows(rows)  # Write sensor data rows
+
+        print(f"CSV file saved: {filename}")
+
+    def save_sensor_intervals_as_csv(self, filename="sensor_intervals_morning.csv"):
+        # Step 1: Find the minimum list length among all sensors
+        min_len = min(len(values) for values in self.sensor_intervals.values())
+        print(f"Min Len: {min_len}")
+
+        # Step 2: Trim all sensor lists to the minimum length
+        trimmed_intervals = {sensor: values[:min_len] for sensor, values in self.sensor_intervals.items()}
+
+        # Step 3: Prepare CSV header (sensor names)
+        sensor_names = list(trimmed_intervals.keys())
+        header = []
+        for sensor in sensor_names:
+            header.append(f"{sensor}")
+
+        # Step 4: Transpose data to align rows properly
+        rows = zip(*[trimmed_intervals[sensor] for sensor in sensor_names])
+
+        # Step 5: Save to CSV
+        with open(filename, "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(header)  # Write header
+            writer.writerows(rows)  # Write sensor data rows
+
+        print(f"CSV file saved: {filename}")
+
+    def save_sensor_intervals_grouped_as_csv(self, filename="sensor_intervals_grouped.csv"):
+        # Step 1: Find the minimum list length among all sensors
+        min_len = min(len(values) for values in self.sensor_intervals.values())
+        print(f"Min Len: {min_len}")
+
+        # Step 2: Trim all sensor lists to the minimum length
+        trimmed_intervals = {sensor: values[:min_len] for sensor, values in self.sensor_intervals.items()}
+
+        # Step 3: Prepare CSV header (sensor names)
+        sensor_names = list(trimmed_intervals.keys())
+        header = []
+        for sensor in sensor_names:
+            header.append(f"{sensor}")
+
+        # Step 4: Transpose data to align rows properly
+        rows = zip(*[trimmed_intervals[sensor] for sensor in sensor_names])
+
+        # Step 5: Save to CSV
+        with open(filename, "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(header)  # Write header
+            writer.writerows(rows)  # Write sensor data rows
+
+        print(f"CSV file saved: {filename}")
