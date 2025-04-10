@@ -40,8 +40,8 @@ void setup() {
   char* device11[] = {"Extra2", "12340014-cbed-76db-9424-74ce6ab51dee"};
 
   RFduinoBLE.advertisementData = "Hi"; // shouldnt be more than 10 characters long
-  RFduinoBLE.deviceName = "Head"; // name of your RFduino. Will appear when other BLE enabled devices search for it
-  RFduinoBLE.customUUID = "12340014-cbed-76db-9423-74ce6ab55dee";
+  RFduinoBLE.deviceName = device1[0]; // name of your RFduino. Will appear when other BLE enabled devices search for it
+  RFduinoBLE.customUUID = device1[1];
   //Serial.println("BLE Start Setup");
   RFduinoBLE.begin(); // begin
 }
@@ -100,95 +100,45 @@ void calibrate_sensors() {
 
 unsigned long connection_time; // used to count offset for syncronic connection
 
-// Following global variables used for packet parameters
-const int SAMPLE_INTERVAL = 10;       // Sampling rate in ms
-const int PACKET_INTERVAL = 50;      // Packet sending rate in ms
-const int BATCH_SIZE = PACKET_INTERVAL / SAMPLE_INTERVAL; // Number of samples per packet
-
-// Packet data buffer
-struct SensorData {
-  int16_t ax, ay, az;
-  int16_t gx, gy, gz;
-  int16_t mx, my, mz;
+struct CompactSensorData {
+  int16_t ax;
+  int16_t ay;
+  int16_t az;
+  int16_t gx;
+  int16_t gy;
+  int16_t gz;
+  int16_t mx;
+  int16_t my;
+  int16_t mz;
 };
 
-SensorData dataBuffer[BATCH_SIZE];
-int sequenceNumber = 0;
-
-// Timer variables
-unsigned long lastSampleTime = 0;
-unsigned long lastPacketTime = 0;
-int sampleCount = 0;
-
+unsigned long previousMillis = 0; // Store the last time sensor data was sent
+const unsigned long interval = 25; // Interval between sending data (in milliseconds)
+// USE checkpoints
 void loop() {
-  unsigned long currentTime = millis();
+  unsigned long currentMillis = millis();
 
-  // Collect sensor data at SAMPLE_INTERVAL
-  if (currentTime - lastSampleTime >= SAMPLE_INTERVAL) {
-    lastSampleTime = currentTime;
+  // Check if the interval has elapsed
+  if (currentMillis - previousMillis >= interval) {
+    previousMillis = currentMillis; // Update the previousMillis
 
-    // Read sensor data
-    accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    // Read raw magnetometer measurements from the device
     mag.getHeading(&mx, &my, &mz);
 
-    // Store data in the buffer
-    dataBuffer[sampleCount].ax = ax;
-    dataBuffer[sampleCount].ay = ay;
-    dataBuffer[sampleCount].az = az;
-    dataBuffer[sampleCount].gx = gx;
-    dataBuffer[sampleCount].gy = gy;
-    dataBuffer[sampleCount].gz = gz;
-    dataBuffer[sampleCount].mx = mx;
-    dataBuffer[sampleCount].my = my;
-    dataBuffer[sampleCount].mz = mz;
+    // Read raw accel/gyro measurements from the device
+    accelgyro.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
-    sampleCount++;
-
-    // Check if the buffer is full
-    if (sampleCount >= BATCH_SIZE) {
-      sendPacket();
-      sampleCount = 0; // Reset the buffer
-    }
-  }
-}
-
-// Function to send the packet
-void sendPacket() {
-  // Get the time of reading
-  unsigned long t_now = millis();
-
-  // Create the packet string
-  String packet = String(sequenceNumber);
-  packet += " " + String(t_now - connection_time);
-  packet += " " + String(BATCH_SIZE);
-
-  // Append sensor readings to the packet
-  for (int i = 0; i < BATCH_SIZE; i++) {
-    packet += " " + String(dataBuffer[i].ax);
-    packet += " " + String(dataBuffer[i].ay);
-    packet += " " + String(dataBuffer[i].az);
-    packet += " " + String(dataBuffer[i].gx);
-    packet += " " + String(dataBuffer[i].gy);
-    packet += " " + String(dataBuffer[i].gz);
-    packet += " " + String(dataBuffer[i].mx);
-    packet += " " + String(dataBuffer[i].my);
-    packet += " " + String(dataBuffer[i].mz);
+    // Prepare and send sensor data over BLE
+    CompactSensorData data = {ax, ay, az, gx, gy, gz, mx, my, mz};
+    RFduinoBLE.send((const char*)&data, sizeof(data));
   }
 
-  // Convert the packet to a char array for BLE transmission
-  char data[packet.length() + 1];
-  packet.toCharArray(data, packet.length() + 1);
-
-  // Send the packet via BLE
-  RFduinoBLE.send(data, sizeof(data));
-
-  // Increment the sequence number
-  sequenceNumber++;
+  // Perform other non-blocking tasks here if needed
 }
 
 void RFduinoBLE_onConnect(){
 
-  void calibrate_sensors();
+  calibrate_sensors();
   connection_time = millis();  // Record the time when BLE connection starts
 
 }

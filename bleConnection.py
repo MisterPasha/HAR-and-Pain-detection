@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from collections import Counter
 import time
 import csv
+import pandas as pd
 
 
 class BLE:
@@ -15,7 +16,6 @@ class BLE:
         self.connected_devices_names = []     # Record names of connected devices
         self.RFDUINO_NAMES = ["Head", "RArm", "RShank", "RThigh", "Back", "LShank", "LArm"]  # List of all RFduino names
         self.RFDUINO_NAME_TO_UUID = {         # Get uuid by device name
-            "Head": "12340015-cbed-76db-9423-74ce6ab55dee",
             "RArm": "12340015-cbed-76db-9423-74ce6ab52dee",
             "RShank": "12340015-cbed-76db-9423-74ce6ab59dee",
             "LShank": "12340015-cbed-76db-9423-74ce6ab57dee",
@@ -24,7 +24,6 @@ class BLE:
             "LArm": "12340015-cbed-76db-9423-74ce6ab53dee"
         }
         self.RFDUINO_UUID_TO_NAME = {
-            "12340015-cbed-76db-9423-74ce6ab55dee": "Head",
             "12340015-cbed-76db-9423-74ce6ab52dee": "RArm",
             "12340015-cbed-76db-9423-74ce6ab59dee": "RShank",
             "12340015-cbed-76db-9423-74ce6ab57dee": "LShank",
@@ -44,44 +43,103 @@ class BLE:
         self.syncing_intervals = {}
         self.receive_times = {}
         self.sensor_intervals = {}  # Intervals between AccelGyro and Mag extraction intervals
+        self.sensor_readings = {}
 
+    # 1. Full 9-axis sensor data handler (accelerometer, gyroscope, magnetometer)
+    def data_handler_for_sensor_readings(self, sender, data):
+        """
+        Handles raw 9-axis sensor data (Accel + Gyro + Mag), each as 16-bit signed integers.
+        Expected BLE packet structure: 9 x int16 -> 18 bytes total
+        Format: <hhhhhhhhh
+        """
+        try:
+            ax, ay, az, gx, gy, gz, mx, my, mz = struct.unpack("<hhhhhhhhh", data)
+            sensor_name = self.RFDUINO_UUID_TO_NAME[sender.uuid]
+            self.sensor_readings.setdefault(sensor_name, []).append([ax, ay, az, gx, gy, gz, mx, my, mz])
+        except struct.error as e:
+            print(f"Error unpacking 9-axis sensor data: {e}")
+
+    # 2. Short version (float values): used in testing/simplified packets
+    def data_handler_for_sensor_readings_short(self, sender, data):
+        """
+        Handles simplified float sensor data (e.g., ax, gx, mx as 3 x float32).
+        Expected BLE packet structure: 3 x float -> 12 bytes total
+        Format: <fff
+        """
+        try:
+            print("hey")
+            ax, gx, mx = struct.unpack("<fff", data)
+            sensor_name = self.RFDUINO_UUID_TO_NAME[sender.uuid]
+            self.sensor_readings.setdefault(sensor_name, []).append([ax, gx, mx])
+        except struct.error as e:
+            print(f"Error unpacking short float sensor data: {e}")
+
+    # 3. Timestamping for drift/misalignment experiments
     async def data_handler_for_timestamping(self, sender, data):
-        """Callback to handle incoming data from RFduino."""
-        # print(f"Data packet Size: {len(data)}")
-        # Unpack received data 20 bytes
+        """
+        Handles timestamped packets: includes 6-axis int16 + uint32 timestamp.
+        Format: <hhhhhhI (6 x int16 + 1 x uint32) = 16 bytes
+        Used to track packet timing and assess inter-sensor alignment.
+        """
         try:
             ax, ay, az, gx, gy, gz, timestamp = struct.unpack("<hhhhhhI", data)
-            t_received = time.time()*1000 - self.connect_time
+            t_received = time.time() * 1000 - self.connect_time
             self.receive_times.setdefault(sender.uuid, []).append(t_received)
+
             if not self.time_synced:
-                if len(self.device_data.keys()) > 5:
+                if len(self.device_data) > 5:
                     self.time_synced = True
                 self.syncing_intervals.setdefault(sender.uuid, int(timestamp - self.checkpoint))
 
-            self.device_data.setdefault(self.RFDUINO_UUID_TO_NAME[sender.uuid], []).append(timestamp - self.syncing_intervals[sender.uuid])
+            adjusted_timestamp = timestamp - self.syncing_intervals[sender.uuid]
+            sensor_name = self.RFDUINO_UUID_TO_NAME[sender.uuid]
+            self.device_data.setdefault(sensor_name, []).append(adjusted_timestamp)
         except struct.error as e:
-            print(f"Error unpacking data: {e}")
+            print(f"Error unpacking timestamped data: {e}")
 
+    # 4. Extraction intervals for AccelGyro and Magnetometer separately
     def data_handler_for_sensor_interval_data(self, sender, data):
+        """
+        Handles data containing timing intervals (in microseconds) between:
+        - Accel/Gyro extraction
+        - Magnetometer extraction
+        Format: <II -> 2 x uint32
+        """
         try:
             accel_gyro_interval, mag_interval = struct.unpack("<II", data)
-            self.sensor_intervals.setdefault(self.RFDUINO_UUID_TO_NAME[sender.uuid], []).append([accel_gyro_interval, mag_interval])
+            sensor_name = self.RFDUINO_UUID_TO_NAME[sender.uuid]
+            self.sensor_intervals.setdefault(sensor_name, []).append([accel_gyro_interval, mag_interval])
         except struct.error as e:
-            print(f"Error unpacking data: {e}")
+            print(f"Error unpacking interval data: {e}")
 
+    # 5. Extraction interval for grouped sensors (used when only one interval per cycle is sent)
     def data_handler_for_sensor_interval_data_grouped(self, sender, data):
+        """
+        Handles grouped extraction interval data: 1 x uint32 per packet.
+        Used in cases where only one timing value is sent per read cycle.
+        Format: <I
+        """
         try:
-            group_interval = struct.unpack("<I", data)
-            self.sensor_intervals.setdefault(self.RFDUINO_UUID_TO_NAME[sender.uuid], []).append(group_interval)
+            group_interval = struct.unpack("<I", data)[0]
+            sensor_name = self.RFDUINO_UUID_TO_NAME[sender.uuid]
+            self.sensor_intervals.setdefault(sensor_name, []).append(group_interval)
         except struct.error as e:
-            print(f"Error unpacking data: {e}")
+            print(f"Error unpacking grouped interval data: {e}")
 
+    # 6. Euler angles handler (formatted as a decoded UTF-8 string)
     def data_handler_for_euler_angles(self, sender, data):
-        decoded_data = data.decode('utf-8')
-        print(decoded_data)
-        parts = decoded_data.split()
-        self.status_var.set(f"x: {parts[1]}   y: {parts[2]}")
-        self.device_data.setdefault(sender.uuid, []).append(parts)
+        """
+        Handles euler angle data in UTF-8 encoded string format: "x: value y: value z: value"
+        Displays X and Y in GUI and stores all parts in device_data.
+        """
+        try:
+            decoded_data = data.decode('utf-8')
+            print(decoded_data)
+            parts = decoded_data.split()
+            self.status_var.set(f"x: {parts[1]}   y: {parts[3]}")  # Adjust index if format differs
+            self.device_data.setdefault(sender.uuid, []).append(parts)
+        except Exception as e:
+            print(f"Error decoding euler angles: {e}")
 
     async def connect_to_rfduino(self, device):
         """Function to connect to a single RFduino device and set up notifications."""
@@ -153,7 +211,7 @@ class BLE:
             self.checkpoint = int(t_now - self.connect_time)
 
             # Start streaming each RFduino simultaneously
-            tasks = [client.start_notify(self.RFDUINO_ADDRESS_TO_UUID[client.address], self.data_handler_for_timestamping) for
+            tasks = [client.start_notify(self.RFDUINO_ADDRESS_TO_UUID[client.address], self.data_handler_for_sensor_readings) for
                      client in self.connected_devices]
             await asyncio.gather(*tasks)
 
@@ -193,247 +251,226 @@ class BLE:
     def stop_streaming(self):
         self.is_streaming = False
         self.stop_time = int(time.time() * 1000 - self.connect_time)
-        self.save_sensor_timestamps_as_csv()
-
-    def align_sensor_data_by_timestamp(self, sensor_data, truth_timestamps):
-        # Extract timestamps and data values
-        timestamps = np.array([ts for ts, _ in sensor_data])
-        values = np.array([val for _, val in sensor_data])
-
-        # Create an aligned array to hold the final values
-        aligned_values = []
-
-        # For each ground truth timestamp, find the closest sensor timestamp
-        for t in truth_timestamps:
-            # Find the index of the closest timestamp in sensor data
-            closest_index = np.argmin(np.abs(timestamps - t))
-            closest_time = timestamps[closest_index]
-
-            # Check if the closest timestamp is within a reasonable range
-            if abs(closest_time - t) <= 5:  # Allowable deviation (e.g., within 5 ms)
-                aligned_values.append(values[closest_index])
-                # Remove this timestamp and value to avoid duplicates in the future
-                timestamps = np.delete(timestamps, closest_index)
-                values = np.delete(values, closest_index)
-            else:
-                # If no close timestamp found, interpolate the value
-                if closest_index == 0:
-                    # If the closest index is the first element, use it directly
-                    aligned_values.append(values[closest_index])
-                elif closest_index == len(timestamps) - 1:
-                    # If the closest index is the last element, use it directly
-                    aligned_values.append(values[closest_index])
-                else:
-                    # Interpolate between the two nearest points
-                    t1, t2 = timestamps[closest_index - 1], timestamps[closest_index]
-                    v1, v2 = values[closest_index - 1], values[closest_index]
-                    interpolated_value = np.interp(t, [t1, t2], [v1, v2])
-                    aligned_values.append(interpolated_value)
-
-        return aligned_values
+        self.save_sensor_readings_as_csv()
 
     def plot_data(self):
-        # Create a figure
+        """
+        Plots X, Y, and Z Euler angles over time for all connected sensors.
+        Each sensor's data is extracted from `self.device_data`, which stores
+        timestamped angle readings per UUID.
+        """
         plt.figure(figsize=(12, 8))
 
-        # Iterate through the dictionary and plot data for each UUID
         for uuid, values in self.device_data.items():
             name = self.RFDUINO_UUID_TO_NAME[uuid]
-            # Extract timestamp, x angle, and y angle
+
+            # Extract timestamps and convert to seconds (relative to first reading)
             timestamps = [int(item[0]) for item in values]
             min_time = min(timestamps)
-            timestamps_in_seconds = [(t - min_time) / 1000 for t in timestamps]  # Convert to seconds
+            timestamps_in_seconds = [(t - min_time) / 1000 for t in timestamps]
+
+            # Extract X, Y, Z angles from data
             x_angles = [int(item[1]) for item in values]
             y_angles = [int(item[2]) for item in values]
             z_angles = [int(item[3]) for item in values]
 
-            # Plot x angles
-            plt.plot(timestamps_in_seconds, x_angles, label=f"{name} - X Angle", linestyle='-')
-            # Plot y angles
-            plt.plot(timestamps_in_seconds, y_angles, label=f"{name} - Y Angle", linestyle='-')
-            # Plot z angles
-            plt.plot(timestamps_in_seconds, z_angles, label=f"{name} - Z Angle", linestyle='-')
+            # Plot all three axes
+            plt.plot(timestamps_in_seconds, x_angles, label=f"{name} - X Angle")
+            plt.plot(timestamps_in_seconds, y_angles, label=f"{name} - Y Angle")
+            plt.plot(timestamps_in_seconds, z_angles, label=f"{name} - Z Angle")
 
-        # Add legend
         plt.legend()
-
-        # Add titles and labels
-        plt.title("Comparison of two devices")
-        plt.xlabel("Seconds")
-        plt.ylabel("Angles (degrees)")
-
-        # Show grid for better readability
+        plt.title("Comparison of Device Euler Angles (X, Y, Z)")
+        plt.xlabel("Time (seconds)")
+        plt.ylabel("Angle (degrees)")
         plt.grid(True)
-
-        # Show the plot
         plt.show()
 
     def plot_data2(self):
-        # Create a figure
+        """
+        Plots only the Y Euler angle over time for all connected sensors.
+        This is useful for focused analysis of a single axis, such as trunk rotation.
+        """
         plt.figure(figsize=(12, 8))
 
-        start = []
-        end = []
-
-        # Iterate through the dictionary and plot data for each UUID
         for uuid, values in self.device_data.items():
             name = self.RFDUINO_UUID_TO_NAME[uuid]
-            # Extract timestamp, x angle, and y angle
+
+            # Time normalization
             timestamps = [int(item[0]) for item in values]
             min_time = min(timestamps)
-            timestamps_in_seconds = [(t - min_time) / 1000 for t in timestamps]  # Convert to seconds
-            x_angles = [int(item[1]) for item in values]
+            timestamps_in_seconds = [(t - min_time) / 1000 for t in timestamps]
+
+            # Only plot Y angle
             y_angles = [int(item[2]) for item in values]
-            #z_angles = [int(item[3]) for item in values]
+            plt.plot(timestamps_in_seconds, y_angles, label=f"{name} - Y Angle")
 
-            # Plot x angles
-            #plt.plot(timestamps_in_seconds, x_angles, label=f"Trunk - X Angle", linestyle='-')
-            # Plot y angles
-            plt.plot(timestamps_in_seconds, y_angles, label=f"Trunk - Y Angle", linestyle='-')
-            # Plot z angles
-            #plt.plot(timestamps, z_angles, label=f"{name} - Z Angle", linestyle='-')
-
-
-        # Add legend
         plt.legend()
-
-        # Add titles and labels
         plt.title("Y Angle Over Time")
-        plt.xlabel("Seconds")
-        plt.ylabel("Angles (degrees)")
-
-        # Show grid for better readability
+        plt.xlabel("Time (seconds)")
+        plt.ylabel("Y Angle (degrees)")
         plt.grid(True)
-
-        # Show the plot
         plt.show()
-
-    def plot_data3(self):
-        plt.figure(figsize=(12, 8))
-        intervals = self.time_intervals
-        del intervals[0]
-        indexes = [i for i in range(len(intervals))]
-        plt.plot(indexes, intervals, linestyle='-')
-        counter = Counter(intervals)
-        most_common = counter.most_common(1)[0]
-        print()
-        print(f"Minimum Interval: {min(intervals)}")
-        print(f"Maximum Interval: {max(intervals)}")
-        print(f"Mean Interval: {sum(intervals) / len(intervals)}")
-        print(f"Most often Interval: {most_common[0]}")
-        # Add legend
-        plt.legend()
-        # Add titles and labels
-        plt.title("Intervals")
-        plt.xlabel("Sequence")
-        plt.ylabel("Interval")
-
-        # Show grid for better readability
-        plt.grid(True)
-
-        # Show the plot
-        plt.show()
+        plt.savefig("_plot.png", dpi=300)
 
     def plot_data4(self):
-        differences = {}
-        min_len = min([len(v) for _, v in self.receive_times.items()])
-        x_axis = self.device_data["12340015-cbed-76db-9423-74ce6ab52dee"]
-        for k, v in self.device_data.items():
-            intervals = []
-            print("")
-            print(f"Device: {self.RFDUINO_UUID_TO_NAME[k]}")
-            print(f"Starting time Sensor/Host: {v[0]} / {int(self.checkpoint)}")
-            print(f"Ending time Sensor/Host: {v[-1]} / {self.stop_time}")
-            print(f"Number of frames: {len(v)}")
-            for i in range(0, len(v)-1):
-                intervals.append(v[i+1] - v[i])
-            print(f"Max/Min interval: {max(intervals)}/{min(intervals)}")
-            differences.setdefault(self.RFDUINO_UUID_TO_NAME[k], [a - b for a, b in zip(self.receive_times[k], v)])
-            print(f"Max/Min Diffs: {max(differences[self.RFDUINO_UUID_TO_NAME[k]])} / {min(differences[self.RFDUINO_UUID_TO_NAME[k]])}")
-            print("")
+        """
+        Analyzes timing intervals between consecutive sensor data packets for each device.
+        Useful for identifying sampling jitter and evaluating synchronization stability.
+        Outputs:
+            - Start and end times
+            - Number of frames received
+            - Max/min interval between packets
+            - Frequency count of interval durations
+        """
+        for uuid, values in self.device_data.items():
+            print("\n" + "=" * 60)
+            print(f"Device: {uuid} ({self.RFDUINO_UUID_TO_NAME[uuid]})")
 
-        all_diffs = list(differences.values())
-        mean_values = [sum(t) / len(t) for t in zip(*all_diffs)]
+            # Extract timestamps from sensor data (assumes index 0 contains time)
+            timestamps = [int(item[0]) for item in values]
 
-        plt.plot(x_axis[:min_len], mean_values, label=f"All sensors mean", linestyle='-')
+            print(f"Starting time Sensor / Host: {timestamps[0]} / {int(self.checkpoint)}")
+            print(f"Ending time   Sensor / Host: {timestamps[-1]} / {self.stop_time}")
+            print(f"Number of frames received: {len(timestamps)}")
 
-        # Add legend
-        plt.legend()
+            # Compute time intervals between consecutive packets
+            intervals = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
 
-        # Add titles and labels
-        plt.title("Send-Receive delays")
-        plt.xlabel("ms")
-        plt.ylabel("Mean Delay")
+            print(f"Max interval: {max(intervals)} ms")
+            print(f"Min interval: {min(intervals)} ms")
+            print(f"Interval distribution: {Counter(intervals)}")
 
-        # Show grid for better readability
-        plt.grid(True)
+    def save_sensor_timestamps_as_csv(self, filename="sensor_timestamps_9.csv"):
+        """
+        Saves the collected timestamp data from all sensors into a CSV file.
 
-        # Show the plot
-        plt.show()
+        Args:
+            filename (str): Name of the output CSV file.
 
-    def save_sensor_timestamps_as_csv(self, filename="sensor_timestamps.csv"):
-
+        Output:
+            CSV file where each column contains timestamps from one sensor.
+        """
+        # Get list of sensor UUIDs (keys in the device_data dictionary)
         sensor_names = list(self.device_data.keys())
-        header = []
-        for sensor in sensor_names:
-            header.append(f"{sensor}")
 
+        # Prepare column headers (human-readable sensor names)
+        header = [f"{sensor}" for sensor in sensor_names]
+
+        # Align data by transposing rows: zip() groups data from each sensor by index
         rows = zip(*[self.device_data[sensor] for sensor in sensor_names])
 
-        # Save to CSV
+        # Write data to CSV
         with open(filename, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(header)  # Write header
-            writer.writerows(rows)  # Write sensor data rows
+            writer.writerow(header)  # Write the header row
+            writer.writerows(rows)  # Write each row of aligned sensor timestamps
 
         print(f"CSV file saved: {filename}")
 
     def save_sensor_intervals_as_csv(self, filename="sensor_intervals_morning.csv"):
-        # Step 1: Find the minimum list length among all sensors
+        """
+        Saves sensor interval data (e.g., time between AccelGyro and Magnetometer readings)
+        into a CSV file, aligning all sensors by the shortest list length.
+
+        Args:
+            filename (str): Output CSV file name.
+        """
+
+        #  Determine the shortest interval list length across all sensors
         min_len = min(len(values) for values in self.sensor_intervals.values())
-        print(f"Min Len: {min_len}")
+        print(f"Minimum common length: {min_len}")
 
-        # Step 2: Trim all sensor lists to the minimum length
-        trimmed_intervals = {sensor: values[:min_len] for sensor, values in self.sensor_intervals.items()}
+        #  Trim each sensor's interval list to match the shortest length
+        trimmed_intervals = {
+            sensor: values[:min_len] for sensor, values in self.sensor_intervals.items()
+        }
 
-        # Step 3: Prepare CSV header (sensor names)
+        #  Prepare the CSV header with sensor names
         sensor_names = list(trimmed_intervals.keys())
-        header = []
-        for sensor in sensor_names:
-            header.append(f"{sensor}")
+        header = [f"{sensor}" for sensor in sensor_names]
 
-        # Step 4: Transpose data to align rows properly
+        # Transpose data — each row represents one aligned time step across all sensors
         rows = zip(*[trimmed_intervals[sensor] for sensor in sensor_names])
 
-        # Step 5: Save to CSV
+        # Write to CSV
         with open(filename, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(header)  # Write header
-            writer.writerows(rows)  # Write sensor data rows
+            writer.writerow(header)  # Column names
+            writer.writerows(rows)  # Sensor interval values
 
         print(f"CSV file saved: {filename}")
 
     def save_sensor_intervals_grouped_as_csv(self, filename="sensor_intervals_grouped.csv"):
-        # Step 1: Find the minimum list length among all sensors
+        """
+        Saves grouped sensor interval data (e.g., one interval per read cycle) to a CSV file.
+        Trims all sensors' data to the shortest length for alignment.
+
+        Args:
+            filename (str): Desired output CSV filename.
+        """
+
+        # Find the shortest interval list across all sensors
         min_len = min(len(values) for values in self.sensor_intervals.values())
         print(f"Min Len: {min_len}")
 
-        # Step 2: Trim all sensor lists to the minimum length
-        trimmed_intervals = {sensor: values[:min_len] for sensor, values in self.sensor_intervals.items()}
+        # Trim each sensor's interval list to this minimum length for alignment
+        trimmed_intervals = {
+            sensor: values[:min_len] for sensor, values in self.sensor_intervals.items()
+        }
 
-        # Step 3: Prepare CSV header (sensor names)
+        #  Generate CSV headers using sensor names
         sensor_names = list(trimmed_intervals.keys())
-        header = []
-        for sensor in sensor_names:
-            header.append(f"{sensor}")
+        header = [f"{sensor}" for sensor in sensor_names]
 
-        # Step 4: Transpose data to align rows properly
+        #  Prepare aligned rows (each row is one timestamped interval per sensor)
         rows = zip(*[trimmed_intervals[sensor] for sensor in sensor_names])
 
-        # Step 5: Save to CSV
+        #  Save to CSV
         with open(filename, "w", newline="") as csvfile:
             writer = csv.writer(csvfile)
-            writer.writerow(header)  # Write header
-            writer.writerows(rows)  # Write sensor data rows
+            writer.writerow(header)  # Write header row
+            writer.writerows(rows)  # Write data rows
 
         print(f"CSV file saved: {filename}")
+
+    def save_sensor_readings_as_csv(self, filename="sensor_data2.csv"):
+        """
+        Saves synchronized 9-axis IMU data (Accel, Gyro, Mag) from multiple sensors into a CSV file.
+        Ensures that all sensors contribute equally by trimming to the shortest length.
+
+        Args:
+            filename (str): Output file name.
+        """
+
+        # Define the expected order of sensors (must match self.sensor_readings structure)
+        sensor_order = ["RArm", "RShank", "LShank", "Back", "RThigh", "LArm"]
+
+        # Create column headers for each sensor (9 axes per sensor)
+        column_names = []
+        for sensor in sensor_order:
+            column_names.extend([
+                f"{sensor}_ax", f"{sensor}_ay", f"{sensor}_az",
+                f"{sensor}_gx", f"{sensor}_gy", f"{sensor}_gz",
+                f"{sensor}_mx", f"{sensor}_my", f"{sensor}_mz"
+            ])
+
+        #  Find the smallest number of samples to ensure synchronization
+        num_samples = min(len(self.sensor_readings[sensor]) for sensor in sensor_order)
+
+        #  Build the data row-by-row in sensor order
+        data = []
+        for i in range(num_samples):
+            row = []
+            for sensor in sensor_order:
+                row.extend(self.sensor_readings[sensor][i])  # Append all 9 values from this sensor
+            data.append(row)
+
+        #  Create and export DataFrame
+        df = pd.DataFrame(data, columns=column_names)
+        df.to_csv(filename, index=False)
+
+        print(f"Sensor data saved to {filename}")
+
+    def print_out_sensor_data(self):
+        print(self.sensor_readings)
